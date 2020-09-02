@@ -32,21 +32,24 @@ class LSTM(nn.Module):
         outMusic = self.linear(lstm_out)
         return outMusic
 
+PATH2SaveModel = './LSTM_Izi.pt'
+enableSaveModel = False
 enableFigures = True
-batch_size = 35
-num_epochs = 400
+enableConstantSin = True
+batch_size = 20
+num_epochs = 4000
 
 # Define model
 print("Build LSTM RNN model ...")
-model = LSTM(input_dim=1, hidden_dim=5, batch_size=batch_size, output_dim=1, num_layers=1).cuda()
+model = LSTM(input_dim=1, hidden_dim=20, batch_size=batch_size, output_dim=1, num_layers=2).cuda()
 
 loss_function = nn.MSELoss()
 
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 fs = torch.tensor(8000, dtype=torch.float).cuda() # [hz]
-sequenceDuration = 10 # sec
-SNR = 15 # [db]
+sequenceDuration = 2 # sec
+SNR = 30 # [db]
 # mean power of sin signal per sample is 0.5
 signalPowerPerSample = 10*np.log10(0.5)
 noisePowerPerSample_dbW = signalPowerPerSample - SNR
@@ -70,6 +73,7 @@ pureSinWaves = torch.sin(phases)
 noise = torch.mul(torch.randn_like(pureSinWaves), noiseStd)
 noisySinWaves = pureSinWaves + noise
 
+modelInputMean_dbW = 10*np.log10(np.mean(np.power(noisySinWaves.cpu().numpy(), 2)))
 
 '''
 plt.plot(tVec.cpu().numpy(), noisySinWaves[:, 0].cpu().numpy())
@@ -79,13 +83,18 @@ plt.grid(True)
 plt.show()
 '''
 print("Training ...")
+minLoss = np.inf
 for epoch in range(num_epochs):
     chripDurations = minChirpDuration + torch.mul(torch.rand_like(chripDurations), maxChirpDuration - minChirpDuration)
     startFreqs = torch.mul(torch.rand_like(startFreqs), fs/2) # [hz/sec]
     startPhases = torch.mul(torch.rand_like(startPhases), two_pi)  # [rad/sec]
 
     k = torch.pow(4000/100, 1/chripDurations)  # k is the rate of exponential change in frequency to transform from 100 to 4000 hz in 10 seconds
-    freqFactor = torch.true_divide(torch.pow(k[None, :].repeat(tVec.shape[0], 1), tVec[:, None].repeat(1, k.shape[0])) - 1, torch.log(k)[None, :].repeat(tVec.shape[0], 1))
+
+    if enableConstantSin:
+        if epoch == 0: freqFactor = tVec[:, None].repeat(1, k.shape[0])
+    else:
+        freqFactor = torch.true_divide(torch.pow(k[None, :].repeat(tVec.shape[0], 1), tVec[:, None].repeat(1, k.shape[0])) - 1, torch.log(k)[None, :].repeat(tVec.shape[0], 1))
 
     phases = torch.mul(torch.mul(startFreqs[None, :].repeat(tVec.shape[0], 1), two_pi), freqFactor) + startPhases[None, :].repeat(tVec.shape[0], 1)
     pureSinWaves = torch.sin(phases)
@@ -118,8 +127,15 @@ for epoch in range(num_epochs):
     loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None]) # compute MSE loss
     loss.backward()  # (backward pass)
     optimizer.step()  # parameter update
+    if loss.item() < minLoss:
+        if enableSaveModel: torch.save(model.state_dict(), PATH2SaveModel)
+        print(f'epoch {epoch}; model saved with loss {10*np.log10(loss.item()) - modelInputMean_dbW} [db]')
+        minLoss = loss.item()
 
-    print(f'epoch {epoch}; LSTM error to noise ratio = {10*np.log10(loss.item()) - noisePowerPerSample_dbW} [db]')
+        plt.figure()
+        plt.plot(tVec.cpu().numpy()[-1000:,0], noisySinWaves.detach().cpu().numpy()[-1000:,0])
+
+    #print(f'epoch {epoch}; LSTM error to mean signal power ratio = {10*np.log10(loss.item()) - modelInputMean_dbW} [db]')
 
     if enableFigures and epoch == 0: # self loss calc
         selfCalcedMSE = np.mean(np.power(noisySinWaves[1:, :, None].detach().cpu().numpy() - modelPredictions[:-1].detach().cpu().numpy(), 2))
