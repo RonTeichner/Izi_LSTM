@@ -52,6 +52,10 @@ class LSTM(nn.Module):
                 if k+n+1 < outMusic.shape[0]:
                     outMusic[k+n+1:k+n+2, :, :, n] = self.linear(lstm_out)
 
+        if inMusic.shape[0] == 1: # in this case outMusic is a duplication of inMusic and both hiddenStateFiltering and nextSampleEst were not assigned:
+            lstm_out, hiddenStateFiltering = self.lstm(inMusic[0:1], hiddenStateFiltering)
+            nextSampleEst = self.linear(lstm_out)
+
         return outMusic, hiddenStateFiltering, nextSampleEst
 
 enableTrain = False
@@ -223,12 +227,12 @@ if enableTest:
         hidden = finalHiddenSingleSample                        # h_{k+1 | k}
 
         for i in range(1, tVec.shape[0]):
-            modelPredictionsSequence[i, :, :, 0], hidden, _ = model(modelPredictionsSequence[i-1, :, :, 0][None, :, :], hidden)
+            _, hidden, modelPredictionsSequence[i, :, :, 0] = model(modelPredictionsSequence[i-1, :, :, 0][None, :, :], hidden)
 
         if enableFigures and epoch==0:
             plt.figure(figsize=(16, 8))
             for i in range(4):
-                signal = torch.cat((modelPredictions, modelPredictionsSequence), dim=0)[:, i, 0].detach().cpu().numpy()
+                signal = torch.cat((modelPredictions[:, :, :, 0], modelPredictionsSequence[:, :, :, 0]), dim=0)[:, i, 0].detach().cpu().numpy()
                 tVecSignal = (1/fs.cpu().numpy()) * np.arange(0, signal.shape[0])
 
                 plt.subplot(4, 2, 2*i + 1)
@@ -242,7 +246,7 @@ if enableTest:
                 plt.plot(tVecSignal[minIdx:maxIdx], signal[minIdx:maxIdx])
                 plt.xlabel('sec')
                 plt.grid(True)
-                plt.suptitle('Spectrograms @ sequence test')
+                plt.suptitle(r'Spectrograms of $\hat{x}_{k \mid \operatorname{min}(k-1, \frac{N}{2})}$ @ sequence test')
             plt.show()
 
     print(f'Mean model gain on all tests is {10*np.log10(np.mean(modelGains))} [db]')
