@@ -8,12 +8,13 @@ import matplotlib.pyplot as plt
 
 # class definition
 class LSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, batch_size, output_dim=8, num_layers=2):
+    def __init__(self, Np, input_dim, hidden_dim, output_dim, num_layers):
         super(LSTM, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.batch_size = batch_size
+
         self.num_layers = num_layers
+        self.Np = Np
 
         # setup LSTM layer
         self.lstm = nn.LSTM(self.input_dim, self.hidden_dim, self.num_layers)
@@ -21,31 +22,53 @@ class LSTM(nn.Module):
         # setup output layer
         self.linear = nn.Linear(self.hidden_dim, output_dim)
 
-    def init_hidden(self):
-        return (
-            torch.zeros(self.num_layers, self.batch_size, self.hidden_dim),
-            torch.zeros(self.num_layers, self.batch_size, self.hidden_dim),
-        )
+    def forward(self, inMusic, hiddenStateFiltering):
+        nSamples, batchSize, nFeatures = inMusic.shape[0], inMusic.shape[1], inMusic.shape[2]
+        outMusic = torch.zeros((nSamples, batchSize, nFeatures, self.Np), dtype=torch.float).cuda()
 
-    def forward(self, inMusic, hidden):
-        lstm_out, hidden = self.lstm(inMusic, hidden)
-        outMusic = self.linear(lstm_out)
-        return outMusic, hidden
+        # outMusic[k, :, :, n] is \hat{x}_{k | j=k-1-n}
+        # now, since j >= 0 we have that the term is defined only for k-1-n >= 0. Therefore for n > k-1 the term is not defined.
+        # We therefore initialize it with the input values:
+
+        for k in range(self.Np):
+            for n in range(k, self.Np):
+                outMusic[k:k+1, :, :, n:n+1] = inMusic[k:k+1, :, :, None]
+
+        for k in range(inMusic.shape[0]):
+            for n in range(min(k, self.Np)): # term is defined for n <= k-1
+                if n == 0:
+                    lstm_out, hiddenStateFiltering = self.lstm(inMusic[k:k+1], hiddenStateFiltering)
+                    hiddenStatePrediction = (hiddenStateFiltering[0].clone(), hiddenStateFiltering[1].clone()) # h_{k+1 | k}
+                    # input to the net is x_k and the state that was progressed in filtering mode
+                    # the performed estimation is \hat{x}_{k+1 | k}
+                    # and indeed outMusic[k + 0 + 1, :, :, 0] = \hat{x}_{k+1 | k}
+                    if k == inMusic.shape[0] - 1: # last k
+                        nextSampleEst = self.linear(lstm_out) # this corresponds with the output hiddenStateFiltering
+                else:
+                    lstm_out, hiddenStatePrediction = self.lstm(outMusic[k+n:k+n+1, :, :, n-1], hiddenStatePrediction)
+                    # input to the net is \hat{x}_{k+n | k} and indeed outMusic[k + n, :, :, n - 1]  is \hat{x}_{k+n | k)}
+                    # the performed estimation is \hat{x}_{k+n+1 | k} and indeed outMusic[k + n + 1, :, :, n] is \hat{x}_{k+n+1 | k }
+
+                if k+n+1 < outMusic.shape[0]:
+                    outMusic[k+n+1:k+n+2, :, :, n] = self.linear(lstm_out)
+
+        return outMusic, hiddenStateFiltering, nextSampleEst
 
 enableTrain = False
 enableTest = True
 
 PATH2SaveModel = './LSTM_Izi.pt'
-enableSaveModel = False
+enableSaveModel = True
 enableFigures = True
 enableConstantSin = True
 batch_size = 20
-num_epochs = 4000
+num_epochs = 4 # 4000
+nFutureSamples2Predict = 1
 
 # Define model
 print("Build LSTM RNN model ...")
 num_layers, hidden_size = 2, 20
-model = LSTM(input_dim=1, hidden_dim=hidden_size, batch_size=batch_size, output_dim=1, num_layers=num_layers).cuda()
+model = LSTM(Np=nFutureSamples2Predict, input_dim=1, hidden_dim=hidden_size, output_dim=1, num_layers=num_layers).cuda()
 h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
 c_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
 
@@ -128,9 +151,10 @@ if enableTrain:
         # zero out gradient, so they don't accumulate btw epochs
         model.zero_grad()
 
-        modelPredictions, _ = model(noisySinWaves[:, :, None], (h_0, c_0))
+        modelPredictions, _, _ = model(noisySinWaves[:, :, None], (h_0, c_0))
+        # modelPredictions[k, :, :, n] is \hat{x}_{k | j=k-1-n}
 
-        loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None]) # compute MSE loss
+        loss = loss_function(modelPredictions, noisySinWaves[:, :, None, None].repeat(1, 1, 1, nFutureSamples2Predict)) # compute MSE loss
         loss.backward()  # (backward pass)
         optimizer.step()  # parameter update
         if loss.item() < minLoss:
@@ -144,7 +168,7 @@ if enableTrain:
         #print(f'epoch {epoch}; LSTM error to mean signal power ratio = {10*np.log10(loss.item()) - modelInputMean_dbW} [db]')
 
         if enableFigures and epoch == 0: # self loss calc
-            selfCalcedMSE = np.mean(np.power(noisySinWaves[1:, :, None].detach().cpu().numpy() - modelPredictions[:-1].detach().cpu().numpy(), 2))
+            selfCalcedMSE = np.mean(np.power(noisySinWaves[:, :, None, None].repeat(1, 1, 1, nFutureSamples2Predict).detach().cpu().numpy() - modelPredictions.detach().cpu().numpy(), 2))
             print(f'self calced MSE = {selfCalcedMSE}; pytorchCalcedMSE = {loss.item()}')
 
 if enableTest:
@@ -171,9 +195,9 @@ if enableTest:
         noise = torch.mul(torch.randn_like(pureSinWaves), noiseStd)
         noisySinWaves = pureSinWaves + noise
 
-        modelPredictions, finalHiddenSingleSample = model(noisySinWaves[:, :, None], (h_0, c_0))
+        modelPredictions, finalHiddenSingleSample, nextSampleEst = model(noisySinWaves[:, :, None], (h_0, c_0))
 
-        loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
+        loss = loss_function(modelPredictions, noisySinWaves[:, :, None, None].repeat(1, 1, 1, nFutureSamples2Predict))  # compute MSE loss
         print(f'Test: model has loss of {10 * np.log10(loss.item()) - modelInputMean_dbW} [db]')
 
         modelInput_W = np.mean(np.power(noisySinWaves.detach().cpu().numpy(), 2))
@@ -185,17 +209,21 @@ if enableTest:
             plt.figure(figsize=(16, 4))
             for i in range(4):
                 plt.subplot(2, 2, i + 1)
-                plt.specgram(x=modelPredictions[:, i, 0].detach().cpu().numpy(), NFFT=256, Fs=fs.cpu().numpy(), noverlap=128)
+                plt.specgram(x=modelPredictions[:, i, 0, 0].detach().cpu().numpy(), NFFT=256, Fs=fs.cpu().numpy(), noverlap=128)
                 plt.colorbar()
                 plt.xlabel('sec')
                 plt.ylabel('hz')
-                plt.suptitle('Spectrograms @ Test')
+                plt.suptitle(r'Spectrograms of $\hat{x}_{k \mid k-1}$ @ Test')
             plt.show()
 
         modelPredictionsSequence = torch.empty_like(modelPredictions)
-        modelPredictionsSequence[0], hidden = model(modelPredictions[-1][None, :, :], finalHiddenSingleSample)
+        # let modelPredictions[-1,:,:,0] be \hat{x}_{k | k-1} then nextSampleEst is \hat{x}_{k+1 | k}
+        # finalHiddenSingleSample is h_{k+1 | k}
+        modelPredictionsSequence[0, :, :, 0] = nextSampleEst    # \hat{x}_{k+1 | k}
+        hidden = finalHiddenSingleSample                        # h_{k+1 | k}
+
         for i in range(1, tVec.shape[0]):
-            modelPredictionsSequence[i], hidden = model(modelPredictionsSequence[i-1][None, :, :], hidden)
+            modelPredictionsSequence[i, :, :, 0], hidden, _ = model(modelPredictionsSequence[i-1, :, :, 0][None, :, :], hidden)
 
         if enableFigures and epoch==0:
             plt.figure(figsize=(16, 8))
