@@ -59,41 +59,59 @@ class LSTM(nn.Module):
         '''
 
         outMusic = torch.zeros((nSamples, batchSize, nFeatures, self.Np), dtype=torch.float).cuda()
+        nextSampleEst = torch.zeros((1, batchSize, nFeatures), dtype=torch.float).cuda()
+        hiddenStatesFiltering = (torch.zeros((nSamples, self.num_layers, batchSize, self.hidden_dim), dtype=torch.float).cuda(), torch.zeros((nSamples, self.num_layers, batchSize, self.hidden_dim), dtype=torch.float).cuda())
+        # hiddenStatesFiltering[k] = h_{k | k-1} for k={1,...,N}
 
         # outMusic[k, :, :, n] is \hat{x}_{k | j=k-1-n}
         # now, since j >= 0 we have that the term is defined only for k-1-n >= 0. Therefore for n > k-1 the term is not defined.
         # We therefore initialize it with the input values:
-
         for k in range(self.Np):
             for n in range(k, self.Np):
                 outMusic[k:k+1, :, :, n:n+1] = inMusic[k:k+1, :, :, None]
 
+        # Performing just filtering and prediction of one future sample
+        # inMusic is x_{0:N-1}, hiddenStateFiltering is h_0
+        for k in range(nSamples):
+            if k == 0:
+                # inMusic[0:1] is x_0, hiddenStateFiltering is h_0
+                _, tmpTuple = self.lstm(inMusic[k:k+1], hiddenStateFiltering)
+                # lstm_out is h_{1 | 0}
+                # hiddenStateFiltering is (h_{1 | 0}, c_{1 | 0})
+            else:
+                _, tmpTuple = self.lstm(inMusic[k:k+1], (hiddenStatesFiltering[0][k-1], hiddenStatesFiltering[1][k-1]))
+            hiddenStatesFiltering[0][k], hiddenStatesFiltering[1][k] = tmpTuple[0], tmpTuple[1]
+
+        nextHiddenStateFiltering = (hiddenStatesFiltering[0][-1], hiddenStatesFiltering[1][-1])
+        linOut = self.linear(hiddenStatesFiltering[0][:, -1])
+        # hiddenStatesFiltering[0][:, -1] is h_{k | k-1} for k={1,...,N}
+        # self.linear(hiddenStatesFiltering[0][:, -1]) is \hat{x}_{k | k-1} for k={1,...,N}
+        outMusic[1:, :, :, 0] = linOut[:-1]
+        # outMusic[1:, :, :, 0] is \hat{x}_{k | k-1} for k={1,...,N-1}
+        nextSampleEst = linOut[-1]
+
+        # Performing prediction of self.Np-1 future samples:
         for b in range(batchSize):
-            for n in range(self.Np):
-                if n == 0:
-                    # inMusic is x_{0:N-1}, hiddenStateFiltering is h_0
-                    inMusicSingleBatch = inMusic[:, b, :].transpose(1, 0)[:, :, None] # now each time=instance is a different batch, so we have signals of length 1
-                    hiddenStateFilteringSingleBatch = (hiddenStateFiltering[0][:, b, :][:, None, :].repeat(1, inMusicSingleBatch.shape[1], 1), hiddenStateFiltering[1][:, b, :][:, None, :].repeat(1, inMusicSingleBatch.shape[1], 1))
-                    lstm_out, hiddenStateFilteringSingleBatch = self.lstm(inMusicSingleBatch, hiddenStateFilteringSingleBatch)
-                    # hiddenStateFilteringSingleBatch is h_{k | k-1} for k={1,...,N}
-                    # lstm_out is h_{k | k-1} for k={1,...,N}
-                    # self.linear(lstm_out) is \hat{x}_{k | k-1} for k={1,...,N}
-                    # outMusic[n+1:, b, :, n] = self.linear(lstm_out.permute(1, 0, 2))[:-1]
-                    # outMusic[1:, :, :, 0] is \hat{x}_{k | k-1} for k={1,...,N-1}
+            for n in range(1, self.Np):
+
+                # outMusic[j:, :, :, n] is \hat{x}_{k | k-1-n} for k={j,...,N-1}
+                inMusicSingleBatch = outMusic[n:, b, :, n-1].transpose(1, 0)[:, :, None]
+                # inMusicSingleBatch is \hat{x}_{k | k-n)} for k={n,...,N-1}
+                if n == 1:
+                    # hiddenStatesFiltering[k] = h_{k | k-1} for k={1,...,N}
+                    # true code and debug code:
+                    hiddenStateFilteringSingleBatch = (hiddenStatesFiltering[0][:-1, :, b, :].permute(1, 0, 2).contiguous(), hiddenStatesFiltering[1][:-1, :, b, :].permute(1, 0, 2).contiguous())
                 else:
-                    # outMusic[j:, :, :, n] is \hat{x}_{k | k-1-n} for k={j,...,N-1}
-                    inMusicSingleBatch = outMusic[n:, b, :, n-1].transpose(1, 0)[:, :, None]
-                    # inMusicSingleBatch is \hat{x}_{k | k-n)} for k={n,...,N-1}
-                    hiddenStateFilteringSingleBatch = (hiddenStateFilteringSingleBatch[0][:, :-1, :], hiddenStateFilteringSingleBatch[1][:, :-1, :])
-                    # hiddenStateFilteringSingleBatch is h_{k | k-n} for k={n,...,N-1}
-                    lstm_out, hiddenStateFilteringSingleBatch = self.lstm(inMusicSingleBatch, hiddenStateFilteringSingleBatch)
-                    # hiddenStateFilteringSingleBatch is h_{k | k-n} for k={n+1,...,N}
-                    # lstm_out is h_{k | k-n} for k={n+1,...,N}
-                    # outMusic[n+1:, b, :, n] = self.linear(lstm_out.permute(1, 0, 2))[:-1]
+                    hiddenStateFilteringSingleBatch = (hiddenStateFilteringSingleBatch[0][:, :-1, :].contiguous(), hiddenStateFilteringSingleBatch[1][:, :-1, :].contiguous())
+                # hiddenStateFilteringSingleBatch is h_{k | k-n} for k={n,...,N-1}
+                lstm_out, hiddenStateFilteringSingleBatch = self.lstm(inMusicSingleBatch, hiddenStateFilteringSingleBatch)
+                # hiddenStateFilteringSingleBatch is h_{k | k-n} for k={n+1,...,N}
+                # lstm_out is h_{k | k-n} for k={n+1,...,N}
+                # outMusic[n+1:, b, :, n] = self.linear(lstm_out.permute(1, 0, 2))[:-1]
 
                 outMusic[n + 1:, b:b+1, :, n] = self.linear(lstm_out.permute(1, 0, 2))[:-1]
 
-        return outMusic, hiddenStateFiltering, nextSampleEst
+        return outMusic, nextHiddenStateFiltering, nextSampleEst
 
 enableTrain = True
 enableTest = False
@@ -103,7 +121,7 @@ enableSaveModel = True
 enableFigures = False
 enableConstantSin = True
 batch_size = 20
-num_epochs = 4000
+num_epochs = 4
 nFutureSamples2Predict = 2
 
 # Define model
@@ -152,6 +170,7 @@ plt.title('LSTM input wave')
 plt.grid(True)
 plt.show()
 '''
+
 if enableTrain:
     print("Training ...")
     model.train()
