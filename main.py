@@ -7,25 +7,18 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 
 # class definition
-class LSTM(nn.Module):
-    def __init__(self, input_dim, hidden_dim, batch_size, output_dim=8, num_layers=2):
-        super(LSTM, self).__init__()
+class GRU(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super(GRU, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.batch_size = batch_size
         self.num_layers = num_layers
 
         # setup LSTM layer
-        self.lstm = nn.LSTM(self.input_dim, self.hidden_dim, self.num_layers)
+        self.lstm = nn.GRU(self.input_dim, self.hidden_dim, self.num_layers)
 
         # setup output layer
         self.linear = nn.Linear(self.hidden_dim, output_dim)
-
-    def init_hidden(self):
-        return (
-            torch.zeros(self.num_layers, self.batch_size, self.hidden_dim),
-            torch.zeros(self.num_layers, self.batch_size, self.hidden_dim),
-        )
 
     def forward(self, inMusic, hidden):
         lstm_out, hidden = self.lstm(inMusic, hidden)
@@ -35,7 +28,7 @@ class LSTM(nn.Module):
 enableTrain = False
 enableTest = True
 
-PATH2SaveModel = './LSTM_Izi.pt'
+PATH2SaveModel = './GRU_Izi.pt'
 enableSaveModel = False
 enableFigures = True
 enableConstantSin = True
@@ -43,11 +36,10 @@ batch_size = 20
 num_epochs = 4000
 
 # Define model
-print("Build LSTM RNN model ...")
-num_layers, hidden_size = 2, 20
-model = LSTM(input_dim=1, hidden_dim=hidden_size, batch_size=batch_size, output_dim=1, num_layers=num_layers).cuda()
+print("Build RNN model ...")
+num_layers, hidden_size = 1, 20
+model = GRU(input_dim=1, hidden_dim=hidden_size, output_dim=1, num_layers=num_layers).cuda()
 h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
-c_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
 
 loss_function = nn.MSELoss()
 
@@ -122,13 +114,13 @@ if enableTrain:
                 plt.colorbar()
                 plt.xlabel('sec')
                 plt.ylabel('hz')
-                plt.suptitle('Spectrograms')
+                plt.suptitle(r'Spectrograms of $x_k$')
             plt.show()
 
         # zero out gradient, so they don't accumulate btw epochs
         model.zero_grad()
 
-        modelPredictions, _ = model(noisySinWaves[:, :, None], (h_0, c_0))
+        modelPredictions, _ = model(noisySinWaves[:, :, None], h_0)
 
         loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None]) # compute MSE loss
         loss.backward()  # (backward pass)
@@ -171,7 +163,7 @@ if enableTest:
         noise = torch.mul(torch.randn_like(pureSinWaves), noiseStd)
         noisySinWaves = pureSinWaves + noise
 
-        modelPredictions, finalHiddenSingleSample = model(noisySinWaves[:, :, None], (h_0, c_0))
+        modelPredictions, finalHiddenSingleSample = model(noisySinWaves[:, :, None], h_0)
 
         loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
         print(f'Test: model has loss of {10 * np.log10(loss.item()) - modelInputMean_dbW} [db]')
@@ -214,7 +206,7 @@ if enableTest:
                 plt.plot(tVecSignal[minIdx:maxIdx], signal[minIdx:maxIdx])
                 plt.xlabel('sec')
                 plt.grid(True)
-                plt.suptitle('Spectrograms @ sequence test')
+                plt.suptitle(r'Spectrograms of $\hat{x}_{k \mid \operatorname{min}(k-1, \frac{N}{2})}$')
             plt.show()
 
     print(f'Mean model gain on all tests is {10*np.log10(np.mean(modelGains))} [db]')
