@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
+import time
 
 # class definition
 class GRU(nn.Module):
@@ -25,21 +26,22 @@ class GRU(nn.Module):
         outMusic = self.linear(lstm_out)
         return outMusic, hidden
 
-enableTrain = False
-enableTest = True
+enableTrain = True
+enableTest = False
 
 PATH2SaveModel = './GRU_Izi.pt'
-enableSaveModel = False
+enableSaveModel = True
 enableFigures = True
 enableConstantSin = True
 batch_size = 20
 num_epochs = 4000
+numberOfFutureSamples = 2
 
 # Define model
 print("Build RNN model ...")
 num_layers, hidden_size = 1, 20
 model = GRU(input_dim=1, hidden_dim=hidden_size, output_dim=1, num_layers=num_layers).cuda()
-h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
+
 
 loss_function = nn.MSELoss()
 
@@ -120,9 +122,33 @@ if enableTrain:
         # zero out gradient, so they don't accumulate btw epochs
         model.zero_grad()
 
-        modelPredictions, _ = model(noisySinWaves[:, :, None], h_0)
+        if False:#numberOfFutureSamples == 1:
+            h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
+            modelPredictions, _ = model(noisySinWaves[:, :, None], h_0)
+            loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
+        else:
+            nSamples, nFeatures = noisySinWaves.shape[0], 1
+            loss = torch.zeros(1, dtype=torch.float).cuda()
+            modelPredictions = torch.zeros(1, nSamples, nFeatures, dtype=torch.float).cuda()
+            hiddenStates = torch.zeros(num_layers, nSamples, hidden_size, dtype=torch.float).cuda()
+            for b in range(batch_size):
+                signalStartTime = time.time()
+                singleSignal = noisySinWaves[:, b:b+1, None]
+                hidden = torch.zeros(num_layers, 1, hidden_size, dtype=torch.float).cuda()
+                for n in range(numberOfFutureSamples):
+                    if n == 1:
+                        signalEndFilteringTime = time.time()
+                        print(f'Epoch {epoch}: Training: signal no. {b} filtering time: {(signalEndFilteringTime - signalStartTime)/1e-3} [ms]')
+                    if n == 0:
+                        for k in range(nSamples):
+                            modelPredictions[:, k:k + 1, :], hidden = model(singleSignal[k:k+1], hidden)
+                            hiddenStates[:, k:k+1, :] = hidden
+                    else:
+                        modelPredictions, hiddenStates = model(modelPredictions, hiddenStates)
+                    loss = torch.add(loss, loss_function(modelPredictions[:, :-1], singleSignal[1:].transpose(1, 0))) # compute MSE loss
+                signalEndTime = time.time()
+                print(f'Epoch {epoch}: Training: signal no. {b} prediction time: {(signalEndTime-signalEndFilteringTime)/1e-3} [ms]')
 
-        loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None]) # compute MSE loss
         loss.backward()  # (backward pass)
         optimizer.step()  # parameter update
         if loss.item() < minLoss:
