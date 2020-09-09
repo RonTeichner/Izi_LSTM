@@ -24,18 +24,18 @@ class GRU(nn.Module):
     def forward(self, inMusic, hidden):
         lstm_out, hidden = self.lstm(inMusic, hidden)
         outMusic = self.linear(lstm_out)
-        return outMusic, hidden
+        return outMusic, hidden, lstm_out
 
-enableTrain = True
-enableTest = False
+enableTrain = False
+enableTest = True
 
 PATH2SaveModel = './GRU_Izi.pt'
-enableSaveModel = True
+enableSaveModel = False
 enableFigures = True
 enableConstantSin = True
 batch_size = 20
 num_epochs = 4000
-numberOfFutureSamples = 2
+numberOfFutureSamples = 1
 
 # Define model
 print("Build RNN model ...")
@@ -122,32 +122,45 @@ if enableTrain:
         # zero out gradient, so they don't accumulate btw epochs
         model.zero_grad()
 
-        if False:#numberOfFutureSamples == 1:
+        if numberOfFutureSamples == 1:
             h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
-            modelPredictions, _ = model(noisySinWaves[:, :, None], h_0)
+            modelPredictions, _, _ = model(noisySinWaves[:, :, None], h_0)
             loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
         else:
             nSamples, nFeatures = noisySinWaves.shape[0], 1
             loss = torch.zeros(1, dtype=torch.float).cuda()
-            modelPredictions = torch.zeros(1, nSamples, nFeatures, dtype=torch.float).cuda()
-            hiddenStates = torch.zeros(num_layers, nSamples, hidden_size, dtype=torch.float).cuda()
+            if num_layers > 1:
+                modelPredictions = torch.zeros(1, nSamples, nFeatures, dtype=torch.float).cuda()
+                hiddenStates = torch.zeros(num_layers, nSamples, hidden_size, dtype=torch.float).cuda()
+
+            filteringPredictions, _, allFilteringStates = model(noisySinWaves[:, :, None], torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda())
+            filteringPredictions, allFilteringStates = filteringPredictions.transpose(1, 0).contiguous(), allFilteringStates.transpose(1, 0).contiguous()
             for b in range(batch_size):
                 signalStartTime = time.time()
                 singleSignal = noisySinWaves[:, b:b+1, None]
-                hidden = torch.zeros(num_layers, 1, hidden_size, dtype=torch.float).cuda()
+                if num_layers > 1: hidden = torch.zeros(num_layers, 1, hidden_size, dtype=torch.float).cuda()
                 for n in range(numberOfFutureSamples):
+                    if n == 0:
+                        if num_layers > 1:
+                            for k in range(nSamples):
+                                modelPredictions[:, k:k + 1, :], hidden, _ = model(singleSignal[k:k+1], hidden)
+                                hiddenStates[:, k:k+1, :] = hidden
+                        else:
+                            #filteringPredictions, _, allFilteringStates = model(singleSignal, hidden)
+                            #modelPredictions = filteringPredictions.transpose(1, 0)
+                            #hiddenStates = allFilteringStates.transpose(1, 0)
+                            modelPredictions = filteringPredictions[b:b+1]
+                            hiddenStates = allFilteringStates[b:b+1]
+                    else:
+                        modelPredictions, hiddenStates, _ = model(modelPredictions, hiddenStates)
+                    loss = torch.add(loss, torch.true_divide(loss_function(modelPredictions[:, :-1], singleSignal[1:].transpose(1, 0)), batch_size))  # compute MSE loss
+
                     if n == 1:
                         signalEndFilteringTime = time.time()
                         print(f'Epoch {epoch}: Training: signal no. {b} filtering time: {(signalEndFilteringTime - signalStartTime)/1e-3} [ms]')
-                    if n == 0:
-                        for k in range(nSamples):
-                            modelPredictions[:, k:k + 1, :], hidden = model(singleSignal[k:k+1], hidden)
-                            hiddenStates[:, k:k+1, :] = hidden
-                    else:
-                        modelPredictions, hiddenStates = model(modelPredictions, hiddenStates)
-                    loss = torch.add(loss, loss_function(modelPredictions[:, :-1], singleSignal[1:].transpose(1, 0))) # compute MSE loss
-                signalEndTime = time.time()
-                print(f'Epoch {epoch}: Training: signal no. {b} prediction time: {(signalEndTime-signalEndFilteringTime)/1e-3} [ms]')
+                    elif n > 1:
+                        signalEndTime = time.time()
+                        print(f'Epoch {epoch}: Training: signal no. {b} prediction time: {(signalEndTime-signalEndFilteringTime)/1e-3} [ms]')
 
         loss.backward()  # (backward pass)
         optimizer.step()  # parameter update
@@ -159,14 +172,10 @@ if enableTrain:
                 plt.figure()
                 plt.plot(tVec.cpu().numpy()[-1000:-1], noisySinWaves.detach().cpu().numpy()[-1000:-1,0])
 
-        #print(f'epoch {epoch}; LSTM error to mean signal power ratio = {10*np.log10(loss.item()) - modelInputMean_dbW} [db]')
-
-        if enableFigures and epoch == 0: # self loss calc
-            selfCalcedMSE = np.mean(np.power(noisySinWaves[1:, :, None].detach().cpu().numpy() - modelPredictions[:-1].detach().cpu().numpy(), 2))
-            print(f'self calced MSE = {selfCalcedMSE}; pytorchCalcedMSE = {loss.item()}')
 
 if enableTest:
     print("Testing ...")
+    h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
     model.load_state_dict(torch.load(PATH2SaveModel))
     model.eval()
     modelGains = np.zeros(num_epochs)
@@ -189,7 +198,7 @@ if enableTest:
         noise = torch.mul(torch.randn_like(pureSinWaves), noiseStd)
         noisySinWaves = pureSinWaves + noise
 
-        modelPredictions, finalHiddenSingleSample = model(noisySinWaves[:, :, None], h_0)
+        modelPredictions, finalHiddenSingleSample, _ = model(noisySinWaves[:, :, None], h_0)
 
         loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
         print(f'Test: model has loss of {10 * np.log10(loss.item()) - modelInputMean_dbW} [db]')
@@ -211,9 +220,9 @@ if enableTest:
             plt.show()
 
         modelPredictionsSequence = torch.empty_like(modelPredictions)
-        modelPredictionsSequence[0], hidden = model(modelPredictions[-1][None, :, :], finalHiddenSingleSample)
+        modelPredictionsSequence[0], hidden, _ = model(modelPredictions[-1][None, :, :], finalHiddenSingleSample)
         for i in range(1, tVec.shape[0]):
-            modelPredictionsSequence[i], hidden = model(modelPredictionsSequence[i-1][None, :, :], hidden)
+            modelPredictionsSequence[i], hidden, _ = model(modelPredictionsSequence[i-1][None, :, :], hidden)
 
         if enableFigures and epoch==0:
             plt.figure(figsize=(16, 8))
