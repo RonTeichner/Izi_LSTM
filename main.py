@@ -122,7 +122,7 @@ if enableTrain:
         # zero out gradient, so they don't accumulate btw epochs
         model.zero_grad()
 
-        if numberOfFutureSamples == 1:
+        if False:#numberOfFutureSamples == 1:
             h_0 = torch.zeros(num_layers, batch_size, hidden_size, dtype=torch.float).cuda()
             modelPredictions, _, _ = model(noisySinWaves[:, :, None], h_0)
             loss = loss_function(modelPredictions[:-1], noisySinWaves[1:, :, None])  # compute MSE loss
@@ -153,7 +153,9 @@ if enableTrain:
                             hiddenStates = allFilteringStates[b:b+1]
                     else:
                         modelPredictions, hiddenStates, _ = model(modelPredictions, hiddenStates)
-                    loss = torch.add(loss, torch.true_divide(loss_function(modelPredictions[:, :-1], singleSignal[1:].transpose(1, 0)), batch_size))  # compute MSE loss
+                    # modelPredictions is \hat{x}_{n+1:n+N} while singleSignal is x_{0:N-1}
+                    # the index of time N-1 in modelPredictions is -1-n-1 and the index of time n+1 in singleSignal is n+1
+                    loss = torch.add(loss, torch.true_divide(loss_function(modelPredictions[:, :-1-n], singleSignal[n+1:].transpose(1, 0)), batch_size))  # compute MSE loss
 
                     if n == 1:
                         signalEndFilteringTime = time.time()
